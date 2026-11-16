@@ -249,6 +249,18 @@ function toNumber(text) {
 }
 
 /**
+ * 把“今天第二天 / 第二天 / 第3天”规范成“2 天”这类病程描述。
+ * @param {string} text - 患者原话。
+ * @returns {string} 规范化病程，未识别则为空串。
+ */
+function normalizeOrdinalDay(text) {
+  const match = String(text ?? '').match(/第\s*([0-9]{1,3}|[一二三四五六七八九十两]{1,3})\s*天/)
+  if (!match) return ''
+  const days = toNumber(match[1])
+  return days > 0 ? `${days}天` : ''
+}
+
+/**
  * 识别病程。
  * @param {string} explicitDuration - “这种情况多久了”的回答。
  * @param {string} chief - 主诉文本（可能自带时长）。
@@ -256,7 +268,7 @@ function toNumber(text) {
  */
 function detectDuration(explicitDuration, chief) {
   const direct = String(explicitDuration ?? '').trim().replace(/\s+/g, '')
-  if (direct && !isNone(direct)) return direct
+  if (direct && !isNone(direct)) return normalizeOrdinalDay(direct) || direct
   const source = String(chief ?? '')
   const withoutOrdinal = source.replace(ORDINAL_DAY_PATTERN, ' ')
   for (const pattern of DURATION_PATTERNS) {
