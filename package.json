@@ -1,6 +1,6 @@
 {
   "name": "@liuhange/dsh-clinic-intake",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pre-visit intake structuring for clinics: six patient questions become a structured intake summary (chief complaint, medications, allergies, past history) capped at 300 Chinese characters. Rule-based, local-only, no diagnosis or medication advice. 诊前信息结构化：患者候诊时回答六个问题，自动整理成医生可快速浏览的就诊摘要。",
   "keywords": [
     "dsh",
@@ -13,7 +13,11 @@
     "问诊",
     "主诉",
     "结构化",
-    "候诊"
+    "候诊",
+    "medical",
+    "patient-intake",
+    "就诊摘要",
+    "门诊"
   ],
   "homepage": "https://github.com/liuhange789/dsh-clinic-intake#readme",
   "repository": {
@@ -68,5 +72,6 @@
   },
   "devDependencies": {
     "esbuild": "^0.25.0"
-  }
+  },
+  "author": "liuhange"
 }
