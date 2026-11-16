@@ -196,3 +196,9 @@ test('页面回灌“未填写”：不产生假药与假过敏，缺失字段�
   assert.deepEqual(value.missing_fields.sort(), ['allergies', 'duration', 'history', 'medications'])
 })
 
+test('病程：显式回答“今天第二天”规范成 2天（实测回归）', () => {
+  const value = extractAnswers({ chief: '右下腹隐痛3天', duration: '今天第二天' })
+  assert.equal(value.chief_complaint.duration, '2天')
+})
+
+
