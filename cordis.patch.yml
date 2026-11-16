@@ -1,0 +1,3 @@
+- insert:
+    - id: clinic-intake
+      name: '@liuhange/dsh-clinic-intake'
