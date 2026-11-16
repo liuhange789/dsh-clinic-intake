@@ -1,6 +1,6 @@
 {
   "name": "@liuhange/dsh-clinic-intake",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pre-visit intake structuring for clinics: six patient questions become a structured intake summary (chief complaint, medications, allergies, past history) capped at 300 Chinese characters. Rule-based, local-only, no diagnosis or medication advice. 诊前信息结构化：患者候诊时回答六个问题，自动整理成医生可快速浏览的就诊摘要。",
   "keywords": [
     "dsh",
