@@ -6,6 +6,7 @@
  * 不写数据库、不记录身份信息、不生成诊断或用药建议。
  */
 
+import { existsSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -114,6 +115,19 @@ function renderPage(args, value) {
   return [{ type: 'text', text: value.message }]
 }
 
+/** 目标已存在时追加 (1)、(2)……，避免静默覆盖同目录下已有的填写页。 */
+function uniqueTarget(target) {
+  if (!existsSync(target)) return target
+  const dir = path.dirname(target)
+  const ext = path.extname(target)
+  const base = path.basename(target, ext)
+  for (let i = 1; i < 1000; i += 1) {
+    const candidate = path.join(dir, `${base}(${i})${ext}`)
+    if (!existsSync(candidate)) return candidate
+  }
+  throw new Error(`同名文件过多，无法为 ${target} 生成新的文件名。`)
+}
+
 export function apply(ctx) {
   ctx.tools.register(
     defineTool({
@@ -192,7 +206,7 @@ export function apply(ctx) {
         render: renderPage,
       },
       async execute(args) {
-        const target = (() => {
+        const requestedTarget = (() => {
           const requested = typeof args.output_path === 'string' ? args.output_path.trim() : ''
           if (requested) {
             return requested.toLowerCase().endsWith('.html')
@@ -201,6 +215,7 @@ export function apply(ctx) {
           }
           return path.resolve(process.cwd(), 'clinic-intake-form.html')
         })()
+        const target = uniqueTarget(requestedTarget)
         const html = buildIntakePage({ clinicName: args.clinic_name })
         try {
           await mkdir(path.dirname(target), { recursive: true })
