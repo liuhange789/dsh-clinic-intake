@@ -139,3 +139,60 @@ test('缺失字段会列出来，摘要仍可生成', () => {
   assert.match(summary.text, /主诉/)
   assert.ok(summary.chars <= 300)
 })
+
+test('用药：并列药名按“和”拆成两条并共享频次', () => {
+  const value = extractAnswers({ chief: '头痛', medications: '吃了布洛芬和头孢，每天三次' })
+  assert.equal(value.medications.length, 2)
+  assert.deepEqual(
+    value.medications.map(item => item.name),
+    ['布洛芬', '头孢'],
+  )
+  for (const item of value.medications) assert.match(item.frequency, /每天三次/)
+})
+
+test('用药：药名剥离剂量，频次支持“一天三次 / 每次一片”', () => {
+  const value = extractAnswers({
+    chief: '头痛',
+    medications: '布洛芬缓释胶囊 0.3g 每天两次 每次一片；头孢 0.1g 一天三次',
+  })
+  assert.equal(value.medications.length, 2)
+  assert.equal(value.medications[0].name, '布洛芬缓释胶囊')
+  assert.equal(value.medications[0].name.includes('0.3g'), false)
+  assert.equal(value.medications[0].name.includes('每天'), false)
+  assert.match(value.medications[0].frequency, /每天两次/)
+  assert.equal(value.medications[1].name, '头孢')
+  assert.equal(value.medications[1].name.includes('0.1g'), false)
+  assert.match(value.medications[1].frequency, /一天三次/)
+})
+
+test('病程：“今天第二天”规范成 2 天，不抽成“二天”', () => {
+  const value = extractAnswers({ chief: '头痛伴恶心，今天第二天，昨晚睡不着' })
+  assert.equal(value.chief_complaint.duration, '2天')
+  assert.notEqual(value.chief_complaint.duration, '二天')
+})
+
+test('分类：主诉主症优先，补充的“睡不着”不抢占头痛标签', () => {
+  const value = extractAnswers({ chief: '头痛伴恶心，昨晚睡不着' })
+  assert.equal(value.reason_category, '疼痛')
+})
+
+test('既往：“无痛胃镜”是名词短语，不被当成“无”吞掉', () => {
+  const value = extractAnswers({ chief: '胃不舒服', history: '无痛胃镜' })
+  assert.deepEqual(value.past_history, ['无痛胃镜'])
+})
+
+test('过敏：去掉句首的“但 / 但是 / 不过”', () => {
+  const value = extractAnswers({ chief: '皮肤痒', allergies: '没有药物过敏，但吃海鲜会起疹子' })
+  assert.deepEqual(value.allergies, ['吃海鲜会起疹子'])
+  assert.equal(value.allergies[0].startsWith('但'), false)
+})
+
+test('页面回灌“未填写”：不产生假药与假过敏，缺失字段恢复', () => {
+  const pageText = ['主诉：头痛', '病程：未填写', '用药：未填写', '过敏：未填写', '既往：未填写', '补充：未填写'].join('\n')
+  const value = extractAnswers(parseLabeledAnswers(pageText))
+  assert.deepEqual(value.medications, [])
+  assert.deepEqual(value.allergies, [])
+  assert.deepEqual(value.past_history, [])
+  assert.deepEqual(value.missing_fields.sort(), ['allergies', 'duration', 'history', 'medications'])
+})
+
