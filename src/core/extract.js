@@ -30,18 +30,57 @@ const NONE_MARKERS = Object.freeze([
   '不记得',
   '暂无',
   '都没有',
+  '未填写',
+  '未作答',
+  '未提供',
   'none',
   'no',
   'n/a',
   '-',
 ])
 
+/** 页面回灌时的占位符：既不是“没有”，也不能算作有效回答。 */
+const PLACEHOLDER_MARKERS = Object.freeze(['未填写', '未作答', '未提供', '未填'])
+
+/** 否定式的整体例外：这些是名词短语，不是“没有”。 */
+const NONE_EXCEPTIONS = /^无(?:痛|创|糖|菌)/
+
+/** 会被误判成姓名的常见非姓名短语。 */
+const NAME_STOPWORDS = Object.freeze(new Set([
+  '高血压',
+  '糖尿病',
+  '贫血',
+  '过敏',
+  '患者',
+  '病人',
+  '医生',
+  '男性',
+  '女性',
+  '老人',
+  '孩子',
+  '孕妇',
+  '头痛',
+  '头晕',
+  '发烧',
+  '感冒',
+  '本人',
+]))
+
 /** 身份信息清洗规则：只记录“擦掉了哪一类”，绝不保留原文。 */
 const PHI_RULES = Object.freeze([
-  { kind: 'phone', pattern: /(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)/g },
+  {
+    // 手机号：允许空格 / 连字符分组，也允许 +86 前缀。
+    kind: 'phone',
+    pattern: /(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d(?:[-\s]?\d){8}(?!\d)/g,
+  },
   { kind: 'id-card', pattern: /(?<!\d)\d{17}[\dXx](?!\d)/g },
   { kind: 'email', pattern: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g },
-  { kind: 'name-label', pattern: /(?:患者姓名|姓名|名字)\s*[:：]\s*[^\s，。；,;]{1,8}/g },
+  {
+    // “姓名：/我叫/我是”后接 2-4 个汉字；常见非姓名短语（高血压等）不擦。
+    kind: 'name-label',
+    pattern: /(?:我叫|我是|患者姓名|姓名|名字)\s*[:：]?\s*([\u4e00-\u9fa5]{2,4})(?![\u4e00-\u9fa5])/g,
+    keep: name => !NAME_STOPWORDS.has(name),
+  },
 ])
 
 /** 部位表；命中顺序即优先级（越具体的部位排在越前面）。 */
@@ -88,13 +127,19 @@ const CHARACTERS = Object.freeze([
 
 /** 病程时长：数字 + 单位，或“半年 / 多年 / 反复”这类口语表述。 */
 const DURATION_PATTERNS = Object.freeze([
-  /(\d{1,3}(?:\.\d)?|[一二三四五六七八九十两百半几]+)\s*(?:个)?\s*(小时|天|日|周|星期|礼拜|月|年)(?:左右|多|余)?/,
+  /(?<!第)(\d{1,3}(?:\.\d)?|[一二三四五六七八九十两百半几]+)\s*(?:个)?\s*(小时|天|日|周|星期|礼拜|月|年)(?:左右|多|余)?/,
   /(半天|一天|两天|好几天|好几个月|大半年|半年|一年多|多年|很久|反复发作)/,
-  /(从|自)\s*[^，。；,;]{2,12}\s*(开始|起)/,
+  /(?:从|自)\s*[^，。；,;]{2,12}\s*(?:开始|起)/,
 ])
 
+/** “第二天 / 第 3 天”这类序数日期表述，单独规范成“N 天”。 */
+const ORDINAL_DAY_PATTERN = /第\s*([0-9]{1,3}|[一二三四五六七八九十两]{1,3})\s*天/g
+
 /** 频次 / 剂量表述，用于把“布洛芬每天三次”拆成 name + frequency。 */
-const FREQUENCY_PATTERN = /((?:每日|每天|一日|每晚|睡前|按需|必要时)[^，。；、,;]{0,10}|(?:\d+|[一二两三四半])\s*次\s*[\/每]?\s*(?:日|天)|bid|tid|qd|qid|必要时)/i
+const FREQUENCY_PATTERN = /(?:每日|每天|一天|一日|每晚|睡前|按需|必要时|每次)\s*[^，。；、,;]{0,10}|(?:\d+|[一二两三四五六七八九十半])\s*次\s*(?:\/[每]?\s*(?:日|天)|日|天)|(?:bid|tid|qd|qid|q\d+h)/gi
+
+/** 剂量单位：从药名里剥离（0.3g / 100mg / 一片 / 2 粒）。 */
+const DOSE_PATTERN = /(?:[0-9]+(?:\.[0-9]+)?\s*(?:mg|g|ml|μg|ug|iu|片|粒|袋|支|丸|喷|滴|贴|包)|(?:一|两|二|三|四|半|[1-4])\s*(?:片|粒|袋|支|丸|喷|滴|贴|包))/gi
 
 /** 就诊原因分类：按部位 + 关键词映射，只用于排序和标签，不是诊断。 */
 const CATEGORY_RULES = Object.freeze([
@@ -106,7 +151,16 @@ const CATEGORY_RULES = Object.freeze([
 ])
 
 /**
- * 清洗身份信息：手机号 / 身份证 / 邮箱 / “姓名: xxx”。
+ * 去掉空白与句读，便于比较“没有 / 无”这类整句否定。
+ * @param {string} text - 原始文本。
+ * @returns {string} 归一化文本。
+ */
+function normalizeValue(text) {
+  return String(text ?? '').trim().toLowerCase().replace(/[。！!，,；;：:\s]/g, '')
+}
+
+/**
+ * 清洗身份信息：手机号 / 身份证 / 邮箱 / 姓名表述。
  * @param {string} text - 原始文本。
  * @returns {{ text: string, hits: Array<{ kind: string }> }} 清洗后的文本与命中类别（不含原文）。
  */
@@ -115,11 +169,14 @@ export function scrubPhi(text) {
   const hits = []
   for (const rule of PHI_RULES) {
     rule.pattern.lastIndex = 0
-    if (rule.pattern.test(result)) {
-      rule.pattern.lastIndex = 0
-      result = result.replace(rule.pattern, '[已隐去]')
-      hits.push({ kind: rule.kind })
-    }
+    let matched = false
+    result = result.replace(rule.pattern, (match, ...rest) => {
+      const captured = typeof rest[0] === 'string' ? rest[0] : ''
+      if (rule.keep && !rule.keep(captured)) return match
+      matched = true
+      return '[已隐去]'
+    })
+    if (matched) hits.push({ kind: rule.kind })
   }
   return { text: result.trim(), hits }
 }
@@ -130,10 +187,22 @@ export function scrubPhi(text) {
  * @returns {boolean} 是否属于“无 / 否认 / 不清楚”。
  */
 function isNone(text) {
-  const value = text.trim().toLowerCase().replace(/[。！!，,；;\s]/g, '')
+  const value = normalizeValue(text)
   if (!value) return true
-  if (value.length > 6) return false
+  if (value.length > 8) return false
+  // “无痛胃镜 / 无痛分娩”是名词短语，不是“没有”。
+  if (NONE_EXCEPTIONS.test(value)) return false
   return NONE_MARKERS.some(marker => value === marker || value.startsWith(marker))
+}
+
+/**
+ * 判断一段文本是否只是页面回灌的占位符（未填写 / 未作答）。
+ * @param {string} text - 待判断文本。
+ * @returns {boolean} 是否属于占位符。
+ */
+function isPlaceholder(text) {
+  const value = normalizeValue(text)
+  return !value || PLACEHOLDER_MARKERS.some(marker => value === marker)
 }
 
 /**
@@ -161,6 +230,25 @@ function detectComplaintShape(text) {
 }
 
 /**
+ * 把“一 / 十二 / 三十”这类中文数字转成阿拉伯数字。
+ * @param {string} text - 数字文本。
+ * @returns {number} 数值；无法解析时为 0。
+ */
+function toNumber(text) {
+  const raw = String(text ?? '').trim()
+  if (/^[0-9]+$/.test(raw)) return Number(raw)
+  const digits = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
+  if (raw === '十') return 10
+  const tenIndex = raw.indexOf('十')
+  if (tenIndex >= 0) {
+    const tens = tenIndex === 0 ? 1 : digits[raw[tenIndex - 1]] ?? 0
+    const ones = tenIndex === raw.length - 1 ? 0 : digits[raw[tenIndex + 1]] ?? 0
+    return tens * 10 + ones
+  }
+  return digits[raw] ?? 0
+}
+
+/**
  * 识别病程。
  * @param {string} explicitDuration - “这种情况多久了”的回答。
  * @param {string} chief - 主诉文本（可能自带时长）。
@@ -170,40 +258,53 @@ function detectDuration(explicitDuration, chief) {
   const direct = String(explicitDuration ?? '').trim().replace(/\s+/g, '')
   if (direct && !isNone(direct)) return direct
   const source = String(chief ?? '')
+  const withoutOrdinal = source.replace(ORDINAL_DAY_PATTERN, ' ')
   for (const pattern of DURATION_PATTERNS) {
-    const match = source.match(pattern)
+    const match = withoutOrdinal.match(pattern)
     if (match) return match[0].replace(/\s+/g, '')
+  }
+  // “今天第二天”这类表述：规范成“2 天”，而不是误抽成“二天”。
+  ORDINAL_DAY_PATTERN.lastIndex = 0
+  const ordinal = ORDINAL_DAY_PATTERN.exec(source)
+  if (ordinal) {
+    const days = toNumber(ordinal[1])
+    if (days > 0) return `${days}天`
   }
   return ''
 }
 
 /**
- * 按用药条目切分：先按强分隔符分组，组内的“每天/每次/按需”等片段归入同一味药。
+ * 按用药条目切分：强分隔符（分号 / 句号 / 换行）之间算一组。
  * @param {string} text - 用药史回答。
- * @returns {string[]} 每味药的完整描述。
+ * @returns {string[]} 每组用药描述。
  */
 function splitMedicationEntries(text) {
-  const groups = String(text ?? '').split(/[；;。\n、]/)
-  const entries = []
-  for (const group of groups) {
-    const parts = group.split(/[，,]/).map(part => part.trim()).filter(Boolean)
-    let current = ''
-    for (const part of parts) {
-      const isDosePart = /^(每天|每日|一日|每次|每晚|睡前|按需|必要时|口服)/.test(part) || /次\s*[\/每]?/.test(part)
-      if (isDosePart) {
-        current = current ? `${current}，${part}` : part
-      } else {
-        if (current) entries.push(current)
-        current = part
-      }
-    }
-    if (current) entries.push(current)
-  }
-  return entries
+  return String(text ?? '')
+    .split(/[；;。\n]/)
+    .map(entry => entry.trim())
+    .filter(Boolean)
 }
 
 /**
- * 提取用药条目。
+ * 清理单个药名：去括号注释、去剂量与频次残片、去动词前缀。
+ * @param {string} text - 药名候选。
+ * @returns {string} 清洗后的药名。
+ */
+function cleanMedicationName(text) {
+  return String(text ?? '')
+    .replace(/[（(][^)）]*[)）]/g, ' ')
+    .replace(DOSE_PATTERN, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^(?:正在|在|吃了|服用|用了|口服|打过|外用|顿服)\s*/, '')
+    .trim()
+    .replace(/[，,；;、。：:\s]+$/g, '')
+    .replace(/^[，,；;、。：:\s]+/g, '')
+    .trim()
+}
+
+/**
+ * 提取用药条目：先抽频次、再剥剂量，最后按“和 / 及 / 顿号”拆成多味药并共享频次。
  * @param {string} text - 用药史回答。
  * @returns {Array<{ name: string, frequency: string }>} 用药清单。
  */
@@ -211,28 +312,20 @@ function extractMedications(text) {
   if (isNone(String(text ?? ''))) return []
   const medications = []
   for (const entry of splitMedicationEntries(text)) {
-    const parts = entry.split(/[，,]/).map(part => part.trim()).filter(Boolean)
-    let name = parts[0] ?? ''
-    let frequencyParts = parts.slice(1)
-    if (parts.length === 1) {
-      const matched = entry.match(FREQUENCY_PATTERN)
-      if (matched) {
-        name = entry.replace(matched[0], ' ')
-        frequencyParts = [matched[0]]
-      }
-    }
-    name = name
-      .replace(/[（(][^)）]*[)）]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .replace(/^(正在|在|吃了|服用|用了|口服|打过)\s*/, '')
-      .trim()
-      .replace(/[，,；;、。：:\s]+$/g, '')
-      .replace(/^[，,；;、。：:\s]+/g, '')
-      .trim()
+    const frequencyParts = []
+    const namePart = entry.replace(FREQUENCY_PATTERN, match => {
+      const value = match.trim()
+      if (value) frequencyParts.push(value)
+      return '，'
+    })
     const frequency = frequencyParts.join('，').trim().slice(0, 20)
-    if (!name || isNone(name)) continue
-    medications.push({ name: name.slice(0, 30), frequency })
+    for (const segment of namePart.split(/[，,；;。、]|和|及|与|＆|&|＋|\+/)) {
+      const name = cleanMedicationName(segment)
+      if (!name || isNone(name)) continue
+      const item = { name: name.slice(0, 30), frequency }
+      if (medications.some(existing => existing.name === item.name && existing.frequency === item.frequency)) continue
+      medications.push(item)
+    }
   }
   return medications
 }
@@ -246,21 +339,41 @@ function extractList(text) {
   if (isNone(String(text ?? ''))) return []
   return splitItems(text)
     .map(item => item.replace(/^(对|有|曾经|以前)\s*/, '').trim())
+    .map(item => item.replace(/^(但|但是|不过|可是|然而)\s*/, '').trim())
     .filter(item => item && !isNone(item))
     .map(item => item.slice(0, 40))
 }
 
 /**
- * 就诊原因分类（标签，不是诊断）。主诉优先，主诉无法归类时才看其余字段。
+ * 在文本里找最早命中的分类；并列时按词表顺序。
+ * @param {string} text - 待匹配文本。
+ * @returns {{ name: string, index: number } | null} 最早命中的分类。
+ */
+function earliestCategory(text) {
+  const source = String(text ?? '')
+  let best = null
+  for (const rule of CATEGORY_RULES) {
+    const index = source.search(rule.pattern)
+    if (index < 0) continue
+    if (!best || index < best.index) best = { name: rule.name, index }
+  }
+  return best
+}
+
+/**
+ * 就诊原因分类（标签，不是诊断）。主诉主症优先，补充说明与其余字段不得抢占。
  * @param {string} chief - 主诉与病程文本。
  * @param {string} rest - 其余回答文本。
  * @returns {string} 分类名。
  */
 function classifyReason(chief, rest) {
   const primary = String(chief ?? '')
-  const secondary = String(rest ?? '')
-  return CATEGORY_RULES.find(rule => rule.pattern.test(primary))?.name
-    ?? CATEGORY_RULES.find(rule => rule.pattern.test(secondary))?.name
+  const clauses = primary.split(/[，,、；;。]/).map(clause => clause.trim()).filter(Boolean)
+  const main = clauses[0] ?? ''
+  const others = clauses.slice(1).join('，')
+  return earliestCategory(main)?.name
+    ?? earliestCategory(others)?.name
+    ?? earliestCategory(rest)?.name
     ?? '其他'
 }
 
@@ -288,11 +401,11 @@ export function extractAnswers(input = {}) {
   const haystack = `${raw.duration} ${raw.medications} ${raw.allergies} ${raw.history} ${raw.extra}`
 
   const missing = []
-  if (!raw.chief) missing.push('chief')
+  if (isPlaceholder(raw.chief)) missing.push('chief')
   if (!duration) missing.push('duration')
-  if (!raw.medications) missing.push('medications')
-  if (!raw.allergies) missing.push('allergies')
-  if (!raw.history) missing.push('history')
+  if (isPlaceholder(raw.medications)) missing.push('medications')
+  if (isPlaceholder(raw.allergies)) missing.push('allergies')
+  if (isPlaceholder(raw.history)) missing.push('history')
 
   return {
     chief_complaint: {
@@ -349,6 +462,7 @@ export function parseLabeledAnswers(text) {
 
 /**
  * 把六段回答渲染成患者页面同款的“标签：内容”文本。
+ * 渲染前再擦一遍身份信息，保证任何对外字段都不会回流出原文。
  * @param {object} input - 六段回答。
  * @returns {string} 可读文本块。
  */
@@ -362,6 +476,9 @@ export function formatLabeledAnswers(input = {}) {
     extra: '补充',
   }
   return ANSWER_FIELDS
-    .map(field => `${labels[field]}：${String(input[field] ?? '').trim() || '未填写'}`)
+    .map(field => {
+      const value = scrubPhi(String(input[field] ?? '')).text
+      return `${labels[field]}：${value || '未填写'}`
+    })
     .join('\n')
 }
