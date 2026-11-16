@@ -58,19 +58,36 @@ function renderChief(complaint, rawLimit) {
 }
 
 /**
- * 列表字段渲染。
+ * 列表字段渲染；条目过多时只保留前 N 条并以“等”收尾。
  * @param {string} label - 行标签。
  * @param {string[]} items - 条目。
+ * @param {number} count - 最多保留的条目数（至少 1）。
+ * @param {(item: string) => string} format - 单条渲染。
  * @returns {string} 一行文本。
  */
-function renderList(label, items) {
+function renderEntries(label, items, count, format) {
   const values = (items ?? []).filter(Boolean)
   if (values.length === 0) return `${label}：未提供`
-  return `${label}：${values.join('；')}`
+  const kept = values.slice(0, Math.max(1, count)).map(format)
+  const suffix = values.length > kept.length ? '等' : ''
+  return `${label}：${kept.join('；')}${suffix}`
+}
+
+/**
+ * 用药条目渲染。
+ * @param {{ name: string, frequency: string }} item - 单条用药。
+ * @returns {string} “药名（频次）”。
+ */
+function formatMedication(item) {
+  const name = clip(item?.name ?? '', 24)
+  const frequency = String(item?.frequency ?? '').trim()
+  return frequency ? `${name}（${frequency}）` : name
 }
 
 /**
  * 生成就诊摘要。
+ * 压缩顺序：补充说明 → 用药条目 → 既往条目 → 过敏条目 → 原始主诉 → 兜底截断；
+ * 无论怎么压缩，“过敏”行与结尾固定声明都保留。
  * @param {object} structured - {@link extractAnswers} 的输出。
  * @param {{ maxChars?: number }} [options] - 可选上限（默认 300，硬上限 300）。
  * @returns {{ text: string, chars: number, trimmed: boolean }} 摘要文本、字符数与是否发生过压缩。
@@ -83,42 +100,45 @@ export function buildSummary(structured, options = {}) {
   const history = structured?.past_history ?? []
   const category = structured?.reason_category || '其他'
 
-  const medicationLine = medications.length
-    ? `用药：${medications.map(item => (item.frequency ? `${item.name}（${item.frequency}）` : item.name)).join('；')}`
-    : '用药：未提供'
-
-  let freeText = String(structured?.free_text ?? '').trim()
+  let extra = String(structured?.free_text ?? '').trim()
   let rawLimit = 60
-  let includedHistory = history.slice()
-  let withExtra = true
+  let medCount = medications.length
+  let historyCount = history.length
+  let allergyCount = allergies.length
   let trimmed = false
 
-  const render = () => {
+  const allergyLine = () => renderEntries('过敏', allergies, allergyCount, item => clip(item, 34))
+  const headLines = () => {
     const lines = ['【就诊摘要】', renderChief(complaint, rawLimit)]
     if (category !== '其他') lines.push(`分类：${category}`)
-    lines.push(medicationLine)
-    lines.push(renderList('过敏', allergies))
-    lines.push(renderList('既往', includedHistory))
-    if (withExtra && freeText) lines.push(`补充：${freeText}`)
-    lines.push(NOTE)
-    return lines.join('\n')
+    lines.push(renderEntries('用药', medications, medCount, formatMedication))
+    lines.push(renderEntries('既往', history, historyCount, item => clip(item, 34)))
+    if (extra) lines.push(`补充：${extra}`)
+    return lines
   }
+  const render = () => [...headLines(), allergyLine(), NOTE].join('\n')
 
   let text = render()
-  // 逐级压缩：补充说明 → 既往条目 → 原始主诉 → 硬截断。
-  while (countChars(text) > maxChars && freeText.length > 0) {
-    freeText = clip(freeText, Math.max(0, Math.floor(Array.from(freeText).length * 0.7)))
-    if (Array.from(freeText).length <= 1) freeText = ''
+
+  while (countChars(text) > maxChars && extra.length > 0) {
+    const length = Array.from(extra).length
+    extra = length <= 1 ? '' : clip(extra, Math.max(0, Math.floor(length * 0.7)))
     trimmed = true
     text = render()
   }
-  if (countChars(text) > maxChars && withExtra) {
-    withExtra = false
+  // 优先截断用药 / 既往条目：保留前 N 味，其余用“等”收尾。
+  while (countChars(text) > maxChars && medCount > 1) {
+    medCount = Math.max(1, Math.floor(medCount / 2))
     trimmed = true
     text = render()
   }
-  while (countChars(text) > maxChars && includedHistory.length > 0) {
-    includedHistory = includedHistory.slice(0, -1)
+  while (countChars(text) > maxChars && historyCount > 1) {
+    historyCount = Math.max(1, Math.floor(historyCount / 2))
+    trimmed = true
+    text = render()
+  }
+  while (countChars(text) > maxChars && allergyCount > 1) {
+    allergyCount = Math.max(1, Math.floor(allergyCount / 2))
     trimmed = true
     text = render()
   }
@@ -128,9 +148,13 @@ export function buildSummary(structured, options = {}) {
     text = render()
   }
   if (countChars(text) > maxChars) {
+    // 兜底：只截断头部，过敏行与固定声明原样保留。
     trimmed = true
-    text = clip(text, maxChars)
+    const tail = [allergyLine(), NOTE].join('\n')
+    const budget = maxChars - countChars(tail) - 1
+    text = `${clip(headLines().join('\n'), Math.max(1, budget))}\n${tail}`
   }
 
   return { text, chars: countChars(text), trimmed }
 }
+
